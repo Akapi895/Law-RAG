@@ -1,0 +1,31 @@
+# =====================================================
+# Thư viện cần thiết cho Hệ thống RAG Luật Việt Nam
+# =====================================================
+
+# LlamaIndex Core và các module mở rộng
+llama-index-core>=0.10.0
+llama-index-llms-gemini>=0.1.0
+llama-index-embeddings-huggingface>=0.1.0
+llama-index-vector-stores-qdrant>=0.1.0
+
+# Qdrant Vector Database
+qdrant-client>=1.7.0
+
+# Xử lý dữ liệu
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Quản lý biến môi trường
+python-dotenv>=1.0.0
+
+# HuggingFace & PyTorch (cho embedding model tiếng Việt)
+transformers>=4.35.0
+torch>=2.0.0
+sentence-transformers>=2.2.0
+
+# Thư viện hỗ trợ khác
+google-generativeai>=0.3.0
+
+# Fusion Retrieval (kết hợp BM25 + Vector Search)
+rank-bm25>=0.2.2
+numpy>=1.24.0
