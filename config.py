@@ -65,6 +65,21 @@ USE_FUSION_RETRIEVAL = True
 USE_METADATA_FILTERING = True
 
 # =====================================================
+# CẤU HÌNH CROSS-ENCODER RERANKING
+# =====================================================
+# Sử dụng Cross-Encoder để rerank kết quả retrieval
+# Cross-Encoder đánh giá cặp (query, document) chính xác hơn bi-encoder
+USE_RERANKING = True
+
+# Model cross-encoder (từ HuggingFace)
+# - "cross-encoder/ms-marco-MiniLM-L-6-v2" (fast, multilingual)
+# - "BAAI/bge-reranker-base" (tốt cho tiếng Việt)
+RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+# Số documents để fetch trước khi rerank (nhiều hơn top_k để có dữ liệu rerank)
+RERANK_TOP_K = 15
+
+# =====================================================
 # CẤU HÌNH ĐƯỜNG DẪN FILE
 # =====================================================
 # Đường dẫn đến file Excel chứa dữ liệu luật

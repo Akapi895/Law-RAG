@@ -16,14 +16,17 @@ from llama_index.core import Settings, Document
 from src.embeddings import VietnameseEmbedding
 from src.llm import GeminiLLM
 from src.vector_store import QdrantStore
-from src.retrievers import BM25Retriever, FusionRetriever, MetadataFilterParser, filter_documents
+from src.retrievers import BM25Retriever, FusionRetriever, MetadataFilterParser, filter_documents, CrossEncoderReranker
 
 from config import (
     SIMILARITY_TOP_K,
     SYSTEM_PROMPT,
     FUSION_ALPHA,
     USE_FUSION_RETRIEVAL,
-    USE_METADATA_FILTERING
+    USE_METADATA_FILTERING,
+    USE_RERANKING,
+    RERANKER_MODEL,
+    RERANK_TOP_K
 )
 
 
@@ -66,8 +69,16 @@ class LegalRAGSystem:
         # Query engine
         self.query_engine = None
         
+        # Khởi tạo Cross-Encoder Reranker
+        self.reranker: Optional[CrossEncoderReranker] = None
+        if USE_RERANKING:
+            self.reranker = CrossEncoderReranker(model_name=RERANKER_MODEL)
+        
         if USE_FUSION_RETRIEVAL:
             print(f"[INFO] Fusion Retrieval đã bật (alpha={FUSION_ALPHA})")
+        
+        if USE_RERANKING and self.reranker and self.reranker.is_available():
+            print(f"[INFO] Cross-Encoder Reranking đã bật (model={RERANKER_MODEL})")
         
         print("[SUCCESS] Khởi tạo hệ thống RAG hoàn tất!")
     
@@ -157,15 +168,22 @@ class LegalRAGSystem:
             print(f"[INFO] Fusion Retrieval: α={FUSION_ALPHA} (vector={FUSION_ALPHA:.0%}, BM25={1-FUSION_ALPHA:.0%})")
             
             # Lấy documents bằng Fusion Retrieval
-            # Lấy nhiều hơn nếu có metadata filter để còn lọc
-            fetch_k = SIMILARITY_TOP_K * 3 if metadata_filter and not metadata_filter.is_empty() else SIMILARITY_TOP_K
+            # Lấy nhiều hơn nếu sẽ rerank hoặc filter
+            need_more = (USE_RERANKING and self.reranker and self.reranker.is_available()) or \
+                        (metadata_filter and not metadata_filter.is_empty())
+            fetch_k = RERANK_TOP_K if need_more else SIMILARITY_TOP_K
             retrieved_docs = self.fusion_retriever.retrieve(question, top_k=fetch_k)
             
             # Áp dụng metadata filter
             if metadata_filter and not metadata_filter.is_empty():
                 retrieved_docs = filter_documents(retrieved_docs, metadata_filter)
-                print(f"[INFO] Sau khi lọc: {len(retrieved_docs)} documents")
-                # Lấy top_k sau khi filter
+                print(f"[INFO] Sau khi lọc metadata: {len(retrieved_docs)} documents")
+            
+            # Áp dụng Cross-Encoder Reranking
+            if USE_RERANKING and self.reranker and self.reranker.is_available():
+                retrieved_docs = self.reranker.rerank(question, retrieved_docs, top_k=SIMILARITY_TOP_K)
+            else:
+                # Không có reranking, cắt về top_k
                 retrieved_docs = retrieved_docs[:SIMILARITY_TOP_K]
             
             if not retrieved_docs:
