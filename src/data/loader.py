@@ -78,9 +78,73 @@ def generate_mock_data(file_path: str = DATA_FILE_PATH) -> None:
     print(f"[SUCCESS] Đã tạo file '{file_path}' với {len(mock_data)} điều luật mẫu.")
 
 
+def create_contextual_header(row: dict) -> str:
+    """
+    Tạo Contextual Chunk Header cho document.
+    
+    Header này được prepend vào content để embedding model
+    "hiểu" được context đầy đủ của mỗi chunk.
+    
+    Args:
+        row: Dictionary chứa metadata của document
+        
+    Returns:
+        Header string được format
+    """
+    # Xử lý hierarchy info nếu có
+    chapter = row.get('chapter', '')
+    section = row.get('section', '')
+    
+    # Build hierarchy path
+    hierarchy_parts = []
+    if chapter:
+        hierarchy_parts.append(chapter)
+    if section:
+        hierarchy_parts.append(section) 
+    hierarchy_parts.append(str(row.get('article_id', '')))
+    hierarchy_path = ' > '.join(filter(None, hierarchy_parts))
+    
+    # Build header
+    header_lines = [
+        f"[VĂN BẢN: {row.get('doc_name', 'N/A')} ({row.get('doc_id', 'N/A')})]",
+        f"[LOẠI: {row.get('doc_type', 'N/A')}]",
+        f"[LĨNH VỰC: {row.get('topic', 'N/A')}]",
+    ]
+    
+    if hierarchy_path:
+        header_lines.append(f"[VỊ TRÍ: {hierarchy_path}]")
+    
+    header_lines.extend([
+        f"[TIÊU ĐỀ: {row.get('title', 'N/A')}]",
+        f"[HIỆU LỰC: {row.get('status', 'N/A')}]",
+        "---"
+    ])
+    
+    return '\n'.join(header_lines)
+
+
+def compute_content_hash(content: str) -> str:
+    """
+    Tính hash SHA256 của content để tracking version.
+    
+    Args:
+        content: Nội dung văn bản
+        
+    Returns:
+        Hash string (16 ký tự đầu)
+    """
+    import hashlib
+    return hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
+
+
 def load_and_process_data(file_path: str = DATA_FILE_PATH) -> list:
     """
     Đọc file Excel và chuyển đổi thành danh sách LlamaIndex Documents.
+    
+    Cải tiến Phase 1:
+    - Contextual Chunk Headers cho mỗi document
+    - Enhanced metadata schema với hierarchy info
+    - Content hash cho version tracking
     
     Args:
         file_path: Đường dẫn đến file Excel
@@ -93,10 +157,11 @@ def load_and_process_data(file_path: str = DATA_FILE_PATH) -> list:
     df = pd.read_excel(file_path, engine='openpyxl')
     print(f"[INFO] Đã đọc được {len(df)} dòng dữ liệu")
     
-    # Lọc bỏ các điều luật đã hết hiệu lực
+    # Lọc bỏ các điều luật đã hết hiệu lực (chỉ giữ "Hiệu lực" hoặc "Còn hiệu lực")
     if 'status' in df.columns:
         original_count = len(df)
-        df = df[df['status'] == 'Hiệu lực']
+        valid_status = ['Hiệu lực', 'Còn hiệu lực']
+        df = df[df['status'].isin(valid_status)]
         filtered_count = original_count - len(df)
         if filtered_count > 0:
             print(f"[INFO] Đã lọc bỏ {filtered_count} điều luật hết hiệu lực")
@@ -104,29 +169,60 @@ def load_and_process_data(file_path: str = DATA_FILE_PATH) -> list:
     documents = []
     
     for idx, row in df.iterrows():
-        # Tạo chuỗi ngữ nghĩa đầy đủ cho embedding
-        semantic_text = f"{row['doc_name']} - {row['article_id']} - {row['title']}: {row['content']}"
+        # Chuyển row thành dict để xử lý
+        row_dict = row.to_dict()
         
-        # Metadata để hỗ trợ trích dẫn nguồn
+        # Tạo contextual header
+        contextual_header = create_contextual_header(row_dict)
+        
+        # Tạo nội dung gốc (không có header)
+        original_content = str(row.get('content', ''))
+        
+        # Tạo semantic text với contextual header
+        # Header + Title + Content để embedding hiểu context
+        semantic_text = f"{contextual_header}\n{row['title']}:\n{original_content}"
+        
+        # Tính content hash cho version tracking
+        content_hash = compute_content_hash(original_content)
+        
+        # Enhanced metadata schema
         metadata = {
-            "doc_id": str(row['doc_id']),
-            "doc_name": str(row['doc_name']),
-            "doc_type": str(row['doc_type']),
-            "topic": str(row['topic']),
-            "article_id": str(row['article_id']),
-            "title": str(row['title']),
-            "status": str(row.get('status', 'Hiệu lực'))
+            # Thông tin văn bản
+            "doc_id": str(row.get('doc_id', '')),
+            "doc_name": str(row.get('doc_name', '')),
+            "doc_type": str(row.get('doc_type', '')),
+            
+            # Phân loại
+            "topic": str(row.get('topic', '')),
+            
+            # Vị trí trong văn bản (hierarchy)
+            "chapter": str(row.get('chapter', '')),
+            "section": str(row.get('section', '')),
+            "article_id": str(row.get('article_id', '')),
+            "title": str(row.get('title', '')),
+            
+            # Trạng thái và version
+            "status": str(row.get('status', 'Hiệu lực')),
+            "content_hash": content_hash,
+            "effective_date": str(row.get('effective_date', '')),
+            
+            # Tracking
+            "source_file": file_path,
+            "row_index": idx,
         }
+        
+        # Tạo unique doc_id
+        unique_doc_id = f"{row.get('doc_id', '')}_{row.get('article_id', '')}".replace(' ', '_')
         
         doc = Document(
             text=semantic_text,
             metadata=metadata,
-            doc_id=f"{row['doc_id']}_{row['article_id']}"
+            doc_id=unique_doc_id
         )
         
         documents.append(doc)
     
-    print(f"[SUCCESS] Đã tạo {len(documents)} LlamaIndex Documents")
+    print(f"[SUCCESS] Đã tạo {len(documents)} LlamaIndex Documents với Contextual Headers")
     
     # Thống kê theo lĩnh vực
     if 'topic' in df.columns:
@@ -134,6 +230,13 @@ def load_and_process_data(file_path: str = DATA_FILE_PATH) -> list:
         print("[INFO] Thống kê theo lĩnh vực:")
         for topic, count in topics.items():
             print(f"  - {topic}: {count} điều")
+    
+    # Thống kê theo loại văn bản
+    if 'doc_type' in df.columns:
+        doc_types = df['doc_type'].value_counts()
+        print("[INFO] Thống kê theo loại văn bản:")
+        for doc_type, count in doc_types.items():
+            print(f"  - {doc_type}: {count} điều")
     
     return documents
 

@@ -87,27 +87,87 @@ RERANK_TOP_K = 15
 DATA_FILE_PATH = "legal_data.xlsx"
 
 # =====================================================
-# SYSTEM PROMPT CHO LLM
+# SYSTEM PROMPT CHO LLM - Legal Chain-of-Thought (L-CoT)
 # =====================================================
-# Prompt này hướng dẫn AI cách trả lời câu hỏi về luật
-SYSTEM_PROMPT = """Bạn là trợ lý AI chuyên về Luật Việt Nam, đặc biệt là Luật Đấu thầu và Luật Xây dựng.
+# Prompt hướng dẫn AI thực hiện suy luận pháp lý từng bước
+# Phiên bản rút gọn để tránh vượt token limit
 
-NHIỆM VỤ CỦA BẠN:
-1. Trả lời câu hỏi của người dùng dựa trên thông tin được cung cấp trong phần Ngữ cảnh (Context).
-2. Câu trả lời phải chính xác, rõ ràng và chuyên nghiệp.
-3. Sử dụng ngôn ngữ pháp lý phù hợp nhưng dễ hiểu.
+SYSTEM_PROMPT = """Bạn là chuyên gia tư vấn pháp luật Việt Nam về Luật Đấu thầu và Luật Xây dựng.
 
-QUY TẮC BẮT BUỘC:
-- BẮT BUỘC phải trích dẫn nguồn ở cuối câu trả lời theo format: "(Theo Điều X, Luật Y)"
-- Nếu thông tin từ nhiều điều luật, hãy liệt kê tất cả các nguồn.
-- Nếu KHÔNG tìm thấy thông tin liên quan trong Context, hãy nói rõ: "Tôi không tìm thấy thông tin về vấn đề này trong cơ sở dữ liệu hiện có."
-- KHÔNG được bịa đặt hoặc suy luận ngoài phạm vi Context.
+## PHƯƠNG PHÁP TRẢ LỜI (5 BƯỚC)
 
-FORMAT TRẢ LỜI:
-1. Trả lời trực tiếp câu hỏi
-2. Giải thích chi tiết nếu cần
-3. Trích dẫn nguồn (Điều luật, Văn bản)
+1. **XÁC ĐỊNH VẤN ĐỀ**: Quan hệ pháp luật nào? Chủ thể nào? Lĩnh vực gì?
+2. **TÌM QUY PHẠM**: Điều khoản nào trong Context điều chỉnh? Có tham chiếu chéo không?
+3. **PHÂN TÍCH**: Đối chiếu tình huống với yếu tố cấu thành quy phạm.
+4. **KẾT LUẬN**: Trả lời rõ ràng + Trích dẫn nguồn (Khoản X, Điều Y, Luật Z)
+5. **KIỂM TRA**: Logic nhất quán? Đủ thông tin chưa?
+
+## QUY TẮC
+
+- BẮT BUỘC trích dẫn nguồn: (Điều X, Luật/Nghị định Y)
+- KHÔNG bịa đặt ngoài Context
+- Nếu thiếu thông tin: nói rõ cần tra cứu thêm gì
+
+## FORMAT
+
+**📋 TÓM TẮT**: [Câu trả lời ngắn gọn]
+
+**📖 CHI TIẾT**: [Phân tích với trích dẫn]
+
+**📚 CĂN CỨ**: [Liệt kê điều luật]
 """
+
+# =====================================================
+# PROMPT PHỤ TRỢ - Dùng cho các tác vụ nội bộ
+# =====================================================
+
+# Prompt đánh giá mức độ liên quan của document
+RELEVANCE_GRADING_PROMPT = """Đánh giá mức độ liên quan của đoạn văn bản pháp luật sau với câu hỏi:
+
+Câu hỏi: {query}
+
+Văn bản:
+{document}
+
+Tiêu chí đánh giá:
+- HIGH: Trực tiếp trả lời câu hỏi hoặc chứa quy phạm pháp luật áp dụng
+- MEDIUM: Liên quan gián tiếp, cung cấp context bổ sung hoặc định nghĩa
+- LOW: Không liên quan hoặc off-topic
+
+Chỉ trả lời một từ: HIGH, MEDIUM, hoặc LOW"""
+
+# Prompt phân tách câu hỏi phức tạp
+QUERY_DECOMPOSITION_PROMPT = """Phân tách câu hỏi pháp lý phức tạp sau thành các câu hỏi con độc lập.
+Mỗi câu hỏi con nên tập trung vào MỘT khía cạnh pháp lý cụ thể.
+
+Câu hỏi gốc: {question}
+
+Hướng dẫn:
+- Xác định các chủ thể pháp luật khác nhau được đề cập
+- Tách riêng các vấn đề về điều kiện, quyền, nghĩa vụ, thủ tục
+- Mỗi câu hỏi con phải có thể trả lời độc lập
+
+Liệt kê các câu hỏi con (mỗi dòng một câu, không đánh số):"""
+
+# Prompt tự kiểm tra câu trả lời
+SELF_VERIFICATION_PROMPT = """Kiểm tra tính chính xác và nhất quán của câu trả lời pháp lý sau:
+
+Câu hỏi: {question}
+
+Câu trả lời: {answer}
+
+Các nguồn đã trích dẫn: {sources}
+
+Kiểm tra:
+1. Câu trả lời có trả lời đúng câu hỏi được đặt ra không?
+2. Các trích dẫn có chính xác và đầy đủ không?
+3. Logic lập luận có nhất quán không?
+4. Có thông tin nào bị thiếu không?
+
+Trả lời theo format:
+PASSED: [Lý do nếu đạt]
+hoặc
+FAILED: [Vấn đề cần sửa]"""
 
 # =====================================================
 # CẤU HÌNH QDRANT (Vector Database)

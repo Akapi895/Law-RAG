@@ -189,24 +189,55 @@ class LegalRAGSystem:
             if not retrieved_docs:
                 return "Không tìm thấy thông tin liên quan trong cơ sở dữ liệu."
             
-            # Tạo context
+            # Tạo context với enhanced source info (tối ưu hóa để giảm token)
             context_parts = []
+            max_context_chars = 8000  # Giới hạn tổng độ dài context
+            current_chars = 0
+            
             for i, doc in enumerate(retrieved_docs, 1):
                 meta = doc.metadata
-                source_info = f"[Nguồn {i}: {meta.get('doc_name', 'N/A')} - {meta.get('article_id', 'N/A')}]"
-                context_parts.append(f"{source_info}\n{doc.text}")
+                
+                # Build source info ngắn gọn
+                source_info = f"[{meta.get('doc_name', 'N/A')} - {meta.get('article_id', 'N/A')}]"
+                
+                # Lấy nội dung gốc (sau header separator "---")
+                text = doc.text
+                if "---\n" in text:
+                    # Chỉ lấy phần content sau header
+                    content = text.split("---\n", 1)[-1].strip()
+                else:
+                    content = text
+                
+                # Kiểm tra độ dài
+                part_text = f"{source_info}\n{content}"
+                if current_chars + len(part_text) > max_context_chars:
+                    # Cắt bớt nếu vượt giới hạn
+                    remaining = max_context_chars - current_chars - len(source_info) - 50
+                    if remaining > 200:
+                        content = content[:remaining] + "..."
+                        part_text = f"{source_info}\n{content}"
+                    else:
+                        break
+                
+                context_parts.append(part_text)
+                current_chars += len(part_text)
             
             context = "\n\n---\n\n".join(context_parts)
             
-            # Tạo prompt
+            # Log về Legal CoT prompt
+            print(f"[INFO] Legal CoT với {len(context_parts)} nguồn ({current_chars} chars)")
+            
+            # Tạo prompt với Legal CoT system prompt
             full_prompt = f"""{SYSTEM_PROMPT}
 
-Ngữ cảnh (Context):
+## Context (Quy phạm pháp luật liên quan):
+
 {context}
 
-Câu hỏi: {question}
+---
+## Câu hỏi: {question}
 
-Câu trả lời:"""
+Hãy phân tích và trả lời:"""
             
             # Gọi LLM
             response = self.llm.complete(full_prompt)
