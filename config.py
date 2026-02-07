@@ -80,6 +80,27 @@ RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 RERANK_TOP_K = 15
 
 # =====================================================
+# CẤU HÌNH QUERY ENHANCEMENT (Phase 2)
+# =====================================================
+# Bật/tắt Query Enhancement (classification + decomposition)
+# - Query Classification: Phân loại câu hỏi để chọn strategy phù hợp
+# - Query Decomposition: Tách câu hỏi phức tạp thành sub-queries
+USE_QUERY_ENHANCEMENT = True
+
+# Bật/tắt HyDE (Hypothetical Document Embedding)
+# - Tạo câu trả lời giả định để cải thiện semantic search
+# - Tăng latency nhưng cải thiện retrieval cho câu hỏi informal
+USE_HYDE = False  # Tắt mặc định để tối ưu tốc độ
+
+# Bật/tắt Iterative Retrieval
+# - Nhiều vòng retrieval để bổ sung context còn thiếu
+# - Tăng latency nhưng cải thiện độ đầy đủ của câu trả lời
+USE_ITERATIVE_RETRIEVAL = True
+
+# Số vòng lặp tối đa cho Iterative Retrieval
+MAX_RETRIEVAL_ITERATIONS = 2
+
+# =====================================================
 # CẤU HÌNH ĐƯỜNG DẪN FILE
 # =====================================================
 # Đường dẫn đến file Excel chứa dữ liệu luật

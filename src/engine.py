@@ -7,6 +7,7 @@ Orchestrates all components:
 - LLM (Google Gemini)
 - Vector Store (Qdrant)
 - Retrievers (BM25, Fusion)
+- Query Enhancement (Phase 2)
 """
 
 from typing import List, Optional, Dict, Any
@@ -18,6 +19,14 @@ from src.llm import GeminiLLM
 from src.vector_store import QdrantStore
 from src.retrievers import BM25Retriever, FusionRetriever, MetadataFilterParser, filter_documents, CrossEncoderReranker
 
+# Phase 2: Query Enhancement imports
+from src.query import (
+    QueryEnhancer,
+    QueryType,
+    IterativeRetriever,
+    RelevanceEvaluator,
+)
+
 from config import (
     SIMILARITY_TOP_K,
     SYSTEM_PROMPT,
@@ -26,7 +35,12 @@ from config import (
     USE_METADATA_FILTERING,
     USE_RERANKING,
     RERANKER_MODEL,
-    RERANK_TOP_K
+    RERANK_TOP_K,
+    # Phase 2 config
+    USE_QUERY_ENHANCEMENT,
+    USE_ITERATIVE_RETRIEVAL,
+    USE_HYDE,
+    MAX_RETRIEVAL_ITERATIONS,
 )
 
 
@@ -38,6 +52,8 @@ class LegalRAGSystem:
     - Vector Search (semantic) để tìm kiếm theo ngữ nghĩa
     - BM25 (keyword) để tìm kiếm theo từ khóa
     - Fusion Retrieval: kết hợp cả hai
+    - Query Enhancement: phân loại và phân tách câu hỏi (Phase 2)
+    - Iterative Retrieval: nhiều vòng retrieval với gap analysis (Phase 2)
     - LLM để sinh câu trả lời
     """
     
@@ -74,13 +90,34 @@ class LegalRAGSystem:
         if USE_RERANKING:
             self.reranker = CrossEncoderReranker(model_name=RERANKER_MODEL)
         
+        # Phase 2: Query Enhancement
+        self.query_enhancer: Optional[QueryEnhancer] = None
+        if USE_QUERY_ENHANCEMENT:
+            # Dùng LLM nếu cần decomposition, ngược lại dùng rule-based
+            self.query_enhancer = QueryEnhancer(
+                llm=self.llm,
+                use_llm_classification=False  # Rule-based classification (nhanh hơn)
+            )
+            print("[INFO] Query Enhancement đã bật (classification + decomposition)")
+        
+        # Phase 2: Relevance Evaluator
+        self.relevance_evaluator = RelevanceEvaluator(llm=self.llm)
+        
+        # Log status
         if USE_FUSION_RETRIEVAL:
             print(f"[INFO] Fusion Retrieval đã bật (alpha={FUSION_ALPHA})")
         
         if USE_RERANKING and self.reranker and self.reranker.is_available():
             print(f"[INFO] Cross-Encoder Reranking đã bật (model={RERANKER_MODEL})")
         
+        if USE_ITERATIVE_RETRIEVAL:
+            print("[INFO] Iterative Retrieval đã bật")
+        
+        if USE_HYDE:
+            print("[INFO] HyDE đã bật")
+        
         print("[SUCCESS] Khởi tạo hệ thống RAG hoàn tất!")
+
     
     def build_index(self, documents: List[Document]) -> None:
         """
@@ -145,7 +182,15 @@ class LegalRAGSystem:
     
     def query(self, question: str) -> str:
         """
-        Thực hiện truy vấn.
+        Thực hiện truy vấn với Query Enhancement (Phase 2).
+        
+        Pipeline:
+        1. Query Enhancement: Classification + Decomposition
+        2. (Optional) HyDE: Generate hypothetical document
+        3. Retrieval với adaptive strategy
+        4. (Optional) Iterative Retrieval: Gap analysis + re-retrieve
+        5. Metadata filtering + Reranking
+        6. Generate answer với Legal CoT
         
         Args:
             question: Câu hỏi của người dùng
@@ -154,7 +199,25 @@ class LegalRAGSystem:
             Câu trả lời từ LLM
         """
         print(f"\n[QUERY] Câu hỏi: {question}")
-        print("[INFO] Đang tìm kiếm thông tin liên quan...")
+        
+        # ============================================================
+        # PHASE 2: Query Enhancement
+        # ============================================================
+        query_analysis = None
+        retrieval_top_k = SIMILARITY_TOP_K
+        
+        if USE_QUERY_ENHANCEMENT and self.query_enhancer is not None:
+            query_analysis = self.query_enhancer.analyze(question)
+            print(f"[INFO] Query Type: {query_analysis.query_type.value} (confidence: {query_analysis.confidence:.2f})")
+            
+            # Adaptive retrieval config
+            retrieval_top_k = query_analysis.retrieval_config.get("top_k", SIMILARITY_TOP_K)
+            
+            # Log decomposition nếu có
+            if query_analysis.is_complex and len(query_analysis.sub_queries) > 1:
+                print(f"[INFO] Query phức tạp → {len(query_analysis.sub_queries)} sub-queries")
+                for i, sq in enumerate(query_analysis.sub_queries, 1):
+                    print(f"  {i}. {sq}")
         
         # Parse metadata filter từ câu hỏi
         metadata_filter = None
@@ -163,55 +226,119 @@ class LegalRAGSystem:
             if not metadata_filter.is_empty():
                 print(f"[INFO] Metadata Filter: {metadata_filter}")
         
-        # Sử dụng Fusion Retrieval nếu được bật
+        # ============================================================
+        # RETRIEVAL
+        # ============================================================
+        print("[INFO] Đang tìm kiếm thông tin liên quan...")
+        
         if USE_FUSION_RETRIEVAL and self.fusion_retriever is not None:
             print(f"[INFO] Fusion Retrieval: α={FUSION_ALPHA} (vector={FUSION_ALPHA:.0%}, BM25={1-FUSION_ALPHA:.0%})")
             
-            # Lấy documents bằng Fusion Retrieval
-            # Lấy nhiều hơn nếu sẽ rerank hoặc filter
+            # Determine fetch size
             need_more = (USE_RERANKING and self.reranker and self.reranker.is_available()) or \
                         (metadata_filter and not metadata_filter.is_empty())
-            fetch_k = RERANK_TOP_K if need_more else SIMILARITY_TOP_K
-            retrieved_docs = self.fusion_retriever.retrieve(question, top_k=fetch_k)
+            fetch_k = RERANK_TOP_K if need_more else retrieval_top_k
             
-            # Áp dụng metadata filter
+            # ============================================================
+            # PHASE 2: HyDE (if enabled)
+            # ============================================================
+            search_query = question
+            if USE_HYDE and self.query_enhancer is not None:
+                hyde_doc = self.query_enhancer.generate_hyde_query(question)
+                if hyde_doc:
+                    print("[INFO] HyDE: Đã tạo hypothetical document")
+                    # Combine original query with HyDE for hybrid search
+                    search_query = f"{question}\n\n{hyde_doc[:500]}"
+            
+            # ============================================================
+            # Retrieve (with sub-queries if complex)
+            # ============================================================
+            retrieved_docs = []
+            
+            if query_analysis and query_analysis.is_complex and len(query_analysis.sub_queries) > 1:
+                # Retrieve cho từng sub-query và merge
+                seen_doc_ids = set()
+                sub_top_k = max(3, fetch_k // len(query_analysis.sub_queries))
+                
+                for sq in query_analysis.sub_queries:
+                    sub_docs = self.fusion_retriever.retrieve(sq, top_k=sub_top_k)
+                    for doc in sub_docs:
+                        doc_id = getattr(doc, 'doc_id', None) or hash(doc.text)
+                        if doc_id not in seen_doc_ids:
+                            seen_doc_ids.add(doc_id)
+                            retrieved_docs.append(doc)
+                
+                print(f"[INFO] Multi-query retrieval: {len(retrieved_docs)} unique documents")
+            else:
+                retrieved_docs = self.fusion_retriever.retrieve(search_query, top_k=fetch_k)
+            
+            # ============================================================
+            # PHASE 2: Iterative Retrieval (if enabled)
+            # ============================================================
+            if USE_ITERATIVE_RETRIEVAL and query_analysis:
+                should_iterate = query_analysis.retrieval_config.get("use_iterative", False)
+                max_iters = query_analysis.retrieval_config.get("max_iterations", MAX_RETRIEVAL_ITERATIONS)
+                
+                if should_iterate and max_iters > 1:
+                    # Create retriever function for iterator
+                    def retrieve_fn(q: str, k: int) -> List[Document]:
+                        return self.fusion_retriever.retrieve(q, top_k=k)
+                    
+                    from src.query import IterativeRetriever
+                    iterative = IterativeRetriever(
+                        retriever_fn=retrieve_fn,
+                        llm=self.llm,
+                        max_iterations=max_iters
+                    )
+                    
+                    iter_result = iterative.retrieve(
+                        question, 
+                        top_k=retrieval_top_k,
+                        initial_documents=retrieved_docs
+                    )
+                    retrieved_docs = iter_result.all_documents
+                    
+                    if iter_result.total_iterations > 1:
+                        print(f"[INFO] Iterative Retrieval: {iter_result.total_iterations} iterations, "
+                              f"sufficient={iter_result.is_sufficient}")
+            
+            # ============================================================
+            # Metadata Filtering
+            # ============================================================
             if metadata_filter and not metadata_filter.is_empty():
                 retrieved_docs = filter_documents(retrieved_docs, metadata_filter)
                 print(f"[INFO] Sau khi lọc metadata: {len(retrieved_docs)} documents")
             
-            # Áp dụng Cross-Encoder Reranking
+            # ============================================================
+            # Reranking
+            # ============================================================
             if USE_RERANKING and self.reranker and self.reranker.is_available():
-                retrieved_docs = self.reranker.rerank(question, retrieved_docs, top_k=SIMILARITY_TOP_K)
+                retrieved_docs = self.reranker.rerank(question, retrieved_docs, top_k=retrieval_top_k)
             else:
-                # Không có reranking, cắt về top_k
-                retrieved_docs = retrieved_docs[:SIMILARITY_TOP_K]
+                retrieved_docs = retrieved_docs[:retrieval_top_k]
             
             if not retrieved_docs:
                 return "Không tìm thấy thông tin liên quan trong cơ sở dữ liệu."
             
-            # Tạo context với enhanced source info (tối ưu hóa để giảm token)
+            # ============================================================
+            # Build Context
+            # ============================================================
             context_parts = []
-            max_context_chars = 8000  # Giới hạn tổng độ dài context
+            max_context_chars = 8000
             current_chars = 0
             
             for i, doc in enumerate(retrieved_docs, 1):
                 meta = doc.metadata
-                
-                # Build source info ngắn gọn
                 source_info = f"[{meta.get('doc_name', 'N/A')} - {meta.get('article_id', 'N/A')}]"
                 
-                # Lấy nội dung gốc (sau header separator "---")
                 text = doc.text
                 if "---\n" in text:
-                    # Chỉ lấy phần content sau header
                     content = text.split("---\n", 1)[-1].strip()
                 else:
                     content = text
                 
-                # Kiểm tra độ dài
                 part_text = f"{source_info}\n{content}"
                 if current_chars + len(part_text) > max_context_chars:
-                    # Cắt bớt nếu vượt giới hạn
                     remaining = max_context_chars - current_chars - len(source_info) - 50
                     if remaining > 200:
                         content = content[:remaining] + "..."
@@ -224,10 +351,12 @@ class LegalRAGSystem:
             
             context = "\n\n---\n\n".join(context_parts)
             
-            # Log về Legal CoT prompt
+            # Log summary
             print(f"[INFO] Legal CoT với {len(context_parts)} nguồn ({current_chars} chars)")
             
-            # Tạo prompt với Legal CoT system prompt
+            # ============================================================
+            # Generate Answer với Legal CoT (giữ nguyên prompt)
+            # ============================================================
             full_prompt = f"""{SYSTEM_PROMPT}
 
 ## Context (Quy phạm pháp luật liên quan):
@@ -239,7 +368,6 @@ class LegalRAGSystem:
 
 Hãy phân tích và trả lời:"""
             
-            # Gọi LLM
             response = self.llm.complete(full_prompt)
             return str(response)
         
